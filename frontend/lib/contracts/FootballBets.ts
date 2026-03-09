@@ -64,9 +64,12 @@ class VibeCheck {
       });
 
       return receipt as TransactionReceipt;
-    } catch (error) {
-      console.error("Error checking vibe:", error);
-      throw new Error("Failed to check vibe");
+    } catch (err: any) {
+      console.error("Error checking vibe:", err);
+      // Re-throw the original error so callers can show the real reason
+      throw new Error(
+        err?.message || err?.toString() || "Failed to check vibe"
+      );
     }
   }
 

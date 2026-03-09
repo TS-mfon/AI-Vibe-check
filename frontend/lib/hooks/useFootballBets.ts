@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import VibeCheck from "../contracts/FootballBets";
 import { getContractAddress, getStudioUrl } from "../genlayer/client";
 import { useWallet } from "../genlayer/wallet";
-import { success, error, configError } from "../utils/toast";
+import { success, error } from "../utils/toast";
 import type { VibeCheckResult } from "../contracts/types";
 
 /**
@@ -17,18 +17,10 @@ export function useVibeCheckContract(): VibeCheck | null {
   const contractAddress = getContractAddress();
   const studioUrl = getStudioUrl();
 
+  // Note: do NOT call toasts (side effects) inside useMemo.
+  // Contract address validation is handled in the mutation itself.
   const contract = useMemo(() => {
-    if (!contractAddress) {
-      configError(
-        "Setup Required",
-        "Contract address not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env.local file.",
-        {
-          label: "Setup Guide",
-          onClick: () => window.open("https://docs.genlayer.com", "_blank"),
-        }
-      );
-      return null;
-    }
+    if (!contractAddress) return null;
     return new VibeCheck(contractAddress, address, studioUrl);
   }, [contractAddress, address, studioUrl]);
 
@@ -59,21 +51,29 @@ export function useTotalChecks() {
  */
 export function useCheckVibe() {
   const contract = useVibeCheckContract();
-  const { address } = useWallet();
+  const { address, isOnCorrectNetwork } = useWallet();
   const queryClient = useQueryClient();
   const [history, setHistory] = useState<VibeCheckResult[]>([]);
   const [lastResult, setLastResult] = useState<VibeCheckResult | null>(null);
 
   const mutation = useMutation({
     mutationFn: async (statement: string) => {
+      // Guard: contract address must be configured
       if (!contract) {
         throw new Error(
-          "Contract not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env.local file."
+          "Contract address not configured. Please add NEXT_PUBLIC_CONTRACT_ADDRESS in your Vercel environment variables."
         );
       }
+      // Guard: wallet must be connected
       if (!address) {
         throw new Error(
-          "Wallet not connected. Please connect your MetaMask wallet to check a vibe."
+          "Wallet not connected. Please connect your MetaMask wallet first."
+        );
+      }
+      // Guard: must be on GenLayer network
+      if (!isOnCorrectNetwork) {
+        throw new Error(
+          "Wrong network. Please switch MetaMask to the GenLayer Studio network (Chain ID: 61999)."
         );
       }
 

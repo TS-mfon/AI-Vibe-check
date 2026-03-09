@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import { Send, Loader2, Wifi } from "lucide-react";
 import { useWallet } from "@/lib/genlayer/wallet";
 import { Button } from "@/components/ui/button";
+import { AlertTriangle } from "lucide-react";
 
 interface VibeCheckInputProps {
   onCheckVibe: (statement: string) => void;
@@ -12,7 +13,7 @@ interface VibeCheckInputProps {
 
 export function VibeCheckInput({ onCheckVibe, isChecking }: VibeCheckInputProps) {
   const [statement, setStatement] = useState("");
-  const { isConnected } = useWallet();
+  const { isConnected, isOnCorrectNetwork } = useWallet();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-resize textarea
@@ -38,7 +39,7 @@ export function VibeCheckInput({ onCheckVibe, isChecking }: VibeCheckInputProps)
     }
   };
 
-  const canSubmit = statement.trim().length > 0 && isConnected && !isChecking;
+  const canSubmit = statement.trim().length > 0 && isConnected && isOnCorrectNetwork && !isChecking;
 
   return (
     <div className="glass-card p-4 md:p-6 animate-fade-in">
@@ -101,6 +102,20 @@ export function VibeCheckInput({ onCheckVibe, isChecking }: VibeCheckInputProps)
           <span>
             Sending to GenLayer blockchain… AI validators are reaching consensus.
             This may take 30 seconds–2 minutes.
+          </span>
+        </div>
+      )}
+
+      {/* Wrong network warning */}
+      {isConnected && !isOnCorrectNetwork && (
+        <div className="mt-3 flex items-start gap-2 text-sm text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 animate-fade-in">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span>
+            Wrong network detected. Please switch MetaMask to{" "}
+            <strong>GenLayer Studio</strong> (Chain ID: 61999, RPC:{" "}
+            <code className="text-xs">https://studio.genlayer.com/api</code>).
+            This happens automatically when you click{" "}
+            <strong>Connect Wallet</strong>.
           </span>
         </div>
       )}
