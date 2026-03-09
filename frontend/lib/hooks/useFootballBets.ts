@@ -2,220 +2,168 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import FootballBets from "../contracts/FootballBets";
+import VibeCheck from "../contracts/FootballBets";
 import { getContractAddress, getStudioUrl } from "../genlayer/client";
 import { useWallet } from "../genlayer/wallet";
 import { success, error, configError } from "../utils/toast";
-import type { Bet, LeaderboardEntry } from "../contracts/types";
+import type { VibeCheckResult } from "../contracts/types";
 
 /**
- * Hook to get the FootballBets contract instance
- *
- * Returns null if contract address is not configured.
- * The contract instance is recreated whenever the wallet address changes.
- * Read-only operations (getBets, getLeaderboard, etc.) work without a connected wallet.
- * Write operations (createBet, resolveBet) require a connected wallet and will fail
- * if the address is null. Defensive validation is added in the mutation hooks.
+ * Hook to get the VibeCheck contract instance.
+ * Recreated whenever the wallet address changes.
  */
-export function useFootballBetsContract(): FootballBets | null {
+export function useVibeCheckContract(): VibeCheck | null {
   const { address } = useWallet();
   const contractAddress = getContractAddress();
   const studioUrl = getStudioUrl();
 
   const contract = useMemo(() => {
-    // Validate contract address is configured
     if (!contractAddress) {
       configError(
         "Setup Required",
-        "Contract address not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env file.",
+        "Contract address not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env.local file.",
         {
           label: "Setup Guide",
-          onClick: () => window.open("/docs/setup", "_blank")
+          onClick: () => window.open("https://docs.genlayer.com", "_blank"),
         }
       );
-      // Return null to indicate contract is not available
       return null;
     }
-
-    // Contract instance is recreated when address changes to ensure
-    // the genlayer-js client is properly configured with the current account
-    return new FootballBets(contractAddress, address, studioUrl);
+    return new VibeCheck(contractAddress, address, studioUrl);
   }, [contractAddress, address, studioUrl]);
 
   return contract;
 }
 
 /**
- * Hook to fetch all bets
- * Refetches on window focus and after mutations
- * Returns empty array if contract is not configured
+ * Hook to read the total number of vibe checks from the contract.
  */
-export function useBets() {
-  const contract = useFootballBetsContract();
-
-  return useQuery<Bet[], Error>({
-    queryKey: ["bets"],
-    queryFn: () => {
-      if (!contract) {
-        return Promise.resolve([]);
-      }
-      return contract.getBets();
-    },
-    refetchOnWindowFocus: true,
-    staleTime: 2000,
-    enabled: !!contract, // Only run query if contract is available
-  });
-}
-
-/**
- * Hook to fetch player points
- * Refetches on window focus and after mutations
- * Returns 0 if contract is not configured
- */
-export function usePlayerPoints(address: string | null) {
-  const contract = useFootballBetsContract();
+export function useTotalChecks() {
+  const contract = useVibeCheckContract();
 
   return useQuery<number, Error>({
-    queryKey: ["playerPoints", address],
+    queryKey: ["totalChecks"],
     queryFn: () => {
-      if (!contract) {
-        return Promise.resolve(0);
-      }
-      return contract.getPlayerPoints(address);
+      if (!contract) return Promise.resolve(0);
+      return contract.getTotalChecks();
     },
     refetchOnWindowFocus: true,
-    enabled: !!address && !!contract, // Require both address and contract
-    staleTime: 2000,
+    staleTime: 5000,
+    enabled: !!contract,
   });
 }
 
 /**
- * Hook to fetch the leaderboard
- * Refetches on window focus and after mutations
- * Returns empty array if contract is not configured
+ * Hook to submit a vibe check via the contract write function.
+ * Maintains a local history of results for the current session.
  */
-export function useLeaderboard() {
-  const contract = useFootballBetsContract();
-
-  return useQuery<LeaderboardEntry[], Error>({
-    queryKey: ["leaderboard"],
-    queryFn: () => {
-      if (!contract) {
-        return Promise.resolve([]);
-      }
-      return contract.getLeaderboard();
-    },
-    refetchOnWindowFocus: true,
-    staleTime: 2000,
-    enabled: !!contract, // Only run query if contract is available
-  });
-}
-
-/**
- * Hook to create a new bet
- */
-export function useCreateBet() {
-  const contract = useFootballBetsContract();
+export function useCheckVibe() {
+  const contract = useVibeCheckContract();
   const { address } = useWallet();
   const queryClient = useQueryClient();
-  const [isCreating, setIsCreating] = useState(false);
+  const [history, setHistory] = useState<VibeCheckResult[]>([]);
+  const [lastResult, setLastResult] = useState<VibeCheckResult | null>(null);
 
   const mutation = useMutation({
-    mutationFn: async ({
-      gameDate,
-      team1,
-      team2,
-      predictedWinner,
-    }: {
-      gameDate: string;
-      team1: string;
-      team2: string;
-      predictedWinner: string;
-    }) => {
+    mutationFn: async (statement: string) => {
       if (!contract) {
-        throw new Error("Contract not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env file.");
+        throw new Error(
+          "Contract not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env.local file."
+        );
       }
       if (!address) {
-        throw new Error("Wallet not connected. Please connect your wallet to create a bet.");
+        throw new Error(
+          "Wallet not connected. Please connect your MetaMask wallet to check a vibe."
+        );
       }
-      setIsCreating(true);
-      return contract.createBet(gameDate, team1, team2, predictedWinner);
+
+      const receipt = await contract.checkVibe(statement);
+
+      // ─── Extract PASS / FAIL from the GenLayer receipt ───────────────
+      // The genlayer-js LeaderReceipt type has a `result: string` field.
+      // Path on localnet / studionet:
+      //   receipt.consensus_data.leader_receipt[0].result  ← primary
+      // Fallback for testnet / future SDK changes:
+      //   receipt.result  (top-level)
+      // We also deep-scan any string values in the receipt as a last resort.
+      let vibe_status: "PASS" | "FAIL" | "UNKNOWN" = "UNKNOWN";
+
+      function extractVibeStatus(value: unknown): "PASS" | "FAIL" | null {
+        if (typeof value === "string") {
+          const v = value.trim().toUpperCase();
+          if (v === "PASS" || v === "FAIL") return v as "PASS" | "FAIL";
+          // Handle quoted string: '"PASS"'
+          const unquoted = v.replace(/^"|"$/g, "");
+          if (unquoted === "PASS" || unquoted === "FAIL") return unquoted as "PASS" | "FAIL";
+        }
+        return null;
+      }
+
+      // 1. consensus_data.leader_receipt (array) — primary for studionet
+      const leaderReceipts = (receipt as any)?.consensus_data?.leader_receipt;
+      if (Array.isArray(leaderReceipts) && leaderReceipts.length > 0) {
+        const found = extractVibeStatus(leaderReceipts[0]?.result);
+        if (found) vibe_status = found;
+      }
+
+      // 2. Top-level receipt.result — testnet / alternative SDK behaviour
+      if (vibe_status === "UNKNOWN") {
+        const found = extractVibeStatus((receipt as any)?.result);
+        if (found) vibe_status = found;
+      }
+
+      // 3. Deep scan all string fields in the receipt object
+      if (vibe_status === "UNKNOWN") {
+        const scan = (obj: any): "PASS" | "FAIL" | null => {
+          if (!obj || typeof obj !== "object") return null;
+          for (const val of Object.values(obj)) {
+            const direct = extractVibeStatus(val);
+            if (direct) return direct;
+            if (typeof val === "object") {
+              const nested = scan(val);
+              if (nested) return nested;
+            }
+          }
+          return null;
+        };
+        const found = scan(receipt);
+        if (found) vibe_status = found;
+      }
+
+      const result: VibeCheckResult = {
+        statement,
+        vibe_status,
+        timestamp: Date.now(),
+        txHash: receipt?.hash,
+      };
+
+      return result;
     },
-    onSuccess: () => {
-      // Invalidate and refetch bets and points after successful creation
-      queryClient.invalidateQueries({ queryKey: ["bets"] });
-      queryClient.invalidateQueries({ queryKey: ["playerPoints"] });
-      queryClient.invalidateQueries({ queryKey: ["leaderboard"] });
-      setIsCreating(false);
-      success("Bet created successfully!", {
-        description: "Your prediction has been recorded on the blockchain."
-      });
+    onSuccess: (result: VibeCheckResult) => {
+      setLastResult(result);
+      setHistory((prev: VibeCheckResult[]) => [result, ...prev]);
+      queryClient.invalidateQueries({ queryKey: ["totalChecks"] });
+      success(
+        result.vibe_status === "PASS" ? "✅ Vibe Passed!" : "❌ Vibe Failed!",
+        {
+          description: `"${result.statement.slice(0, 60)}${result.statement.length > 60 ? "…" : ""}"`,
+        }
+      );
     },
     onError: (err: any) => {
-      console.error("Error creating bet:", err);
-      setIsCreating(false);
-      error("Failed to create bet", {
-        description: err?.message || "Please try again."
+      console.error("Error checking vibe:", err);
+      error("Vibe Check Failed", {
+        description: err?.message || "Please try again.",
       });
     },
   });
 
   return {
     ...mutation,
-    isCreating,
-    createBet: mutation.mutate,
-    createBetAsync: mutation.mutateAsync,
-  };
-}
-
-/**
- * Hook to resolve a bet
- */
-export function useResolveBet() {
-  const contract = useFootballBetsContract();
-  const { address } = useWallet();
-  const queryClient = useQueryClient();
-  const [isResolving, setIsResolving] = useState(false);
-  const [resolvingBetId, setResolvingBetId] = useState<string | null>(null);
-
-  const mutation = useMutation({
-    mutationFn: async (betId: string) => {
-      if (!contract) {
-        throw new Error("Contract not configured. Please set NEXT_PUBLIC_CONTRACT_ADDRESS in your .env file.");
-      }
-      if (!address) {
-        throw new Error("Wallet not connected. Please connect your wallet to resolve a bet.");
-      }
-      setIsResolving(true);
-      setResolvingBetId(betId);
-      return contract.resolveBet(betId);
-    },
-    onSuccess: () => {
-      // Invalidate and refetch all data after successful resolution
-      queryClient.invalidateQueries({ queryKey: ["bets"] });
-      queryClient.invalidateQueries({ queryKey: ["playerPoints"] });
-      queryClient.invalidateQueries({ queryKey: ["leaderboard"] });
-      setIsResolving(false);
-      setResolvingBetId(null);
-      success("Bet resolved successfully!", {
-        description: "The winner has been determined."
-      });
-    },
-    onError: (err: any) => {
-      console.error("Error resolving bet:", err);
-      setIsResolving(false);
-      setResolvingBetId(null);
-      error("Failed to resolve bet", {
-        description: err?.message || "Please try again."
-      });
-    },
-  });
-
-  return {
-    ...mutation,
-    isResolving,
-    resolvingBetId,
-    resolveBet: mutation.mutate,
-    resolveBetAsync: mutation.mutateAsync,
+    history,
+    lastResult,
+    checkVibe: (statement: string) => mutation.mutate(statement),
+    checkVibeAsync: mutation.mutateAsync,
+    isChecking: mutation.isPending,
   };
 }
